@@ -1,0 +1,17 @@
+name: iris_sdui_renderer
+description: Server-driven UI renderer for IRIS-workflow (Flutter widgets).
+version: 0.0.1
+publish_to: 'none'
+
+environment:
+  sdk: ">=3.5.0 <4.0.0"
+  flutter: ">=3.32.0"
+
+dependencies:
+  flutter:
+    sdk: flutter
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^4.0.0

@@ -1,0 +1,47 @@
+version: "3.9"
+
+# IRIS-workflow ローカル開発用サービス群。
+# Usage:
+#   docker compose -f infra/docker/docker-compose.yml up -d
+#
+# Services:
+#   - postgres : ワークフロー・実行ログ・デバイスレジストリ
+#   - mosquitto: MQTT broker (IoT デバイス疎通用)
+#
+# 本番 (= ホストPC常駐) では rumqttd の埋め込み + ホストOSの postgres へ移行予定。
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: iris-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: iris
+      POSTGRES_PASSWORD: iris_dev_password
+      POSTGRES_DB: iris
+    ports:
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U iris -d iris"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  mosquitto:
+    image: eclipse-mosquitto:2
+    container_name: iris-mosquitto
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:1883:1883"
+      - "127.0.0.1:9001:9001"
+    volumes:
+      - ./mosquitto/config:/mosquitto/config:ro
+      - mosquitto-data:/mosquitto/data
+      - mosquitto-log:/mosquitto/log
+
+volumes:
+  postgres-data:
+  mosquitto-data:
+  mosquitto-log:

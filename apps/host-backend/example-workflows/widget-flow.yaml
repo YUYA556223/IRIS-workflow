@@ -1,0 +1,40 @@
+# IRIS-workflow サンプル: AI が生成したテキストでウィジェットを更新する。
+#
+# 事前条件:
+#   - SDUI spec "briefing-card-v1" が登録済
+#   - 同 spec を使ったウィジェットが作成済 (id を `with.widget_id` に渡す)
+#
+# 実行:
+#   curl -X POST http://127.0.0.1:8787/workflows/widget-flow/run \
+#        -H 'Content-Type: application/json' \
+#        -d '{"widget_id":"<existing-widget-uuid>"}'
+
+id: widget-flow
+name: AI-Driven Widget Update
+description: AI が生成した本文でウィジェットの bindings を更新するフロー。
+
+trigger:
+  type: manual
+
+nodes:
+  - id: summarize
+    type: ai
+    using: claude-code
+    with:
+      prompt: |
+        Provide a 1-sentence positive briefing for today (just one short sentence, no quotes).
+      permission_mode: plan
+      allowed_tools: []
+
+  - id: update
+    type: action
+    using: builtin/widget-update
+    with:
+      widget_id: "{{ trigger.widget_id }}"
+      bindings:
+        title: "Daily Briefing"
+        body: "{{ summarize.text }}"
+
+edges:
+  - from: summarize
+    to: update

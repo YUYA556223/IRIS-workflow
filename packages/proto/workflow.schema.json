@@ -1,0 +1,48 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://iris.memorylab.jp/schemas/workflow.schema.json",
+  "title": "IRIS Workflow",
+  "description": "ワークフロー定義 (DAG)。詳細は docs/concept/05-workflow-dsl.md を参照",
+  "type": "object",
+  "required": ["id", "name", "trigger", "nodes"],
+  "properties": {
+    "id": { "type": "string", "pattern": "^[a-z0-9-]+$" },
+    "name": { "type": "string" },
+    "description": { "type": "string" },
+    "trigger": {
+      "type": "object",
+      "required": ["type"],
+      "properties": {
+        "type": {
+          "type": "string",
+          "enum": ["cron", "webhook", "voice", "fs-watch", "mqtt", "manual"]
+        }
+      }
+    },
+    "nodes": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id", "type"],
+        "properties": {
+          "id": { "type": "string" },
+          "type": { "type": "string", "enum": ["ai", "transform", "action", "branch", "parallel"] },
+          "using": { "type": "string" },
+          "with": { "type": "object", "additionalProperties": true }
+        }
+      }
+    },
+    "edges": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["from", "to"],
+        "properties": {
+          "from": { "type": "string" },
+          "to": { "type": "string" },
+          "when": { "type": "string" }
+        }
+      }
+    }
+  }
+}

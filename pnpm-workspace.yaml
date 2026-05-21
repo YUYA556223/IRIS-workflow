@@ -1,0 +1,7 @@
+packages:
+  - "apps/web-console"
+  - "packages/sdk-ts"
+
+ignoredBuiltDependencies:
+  - sharp
+  - unrs-resolver

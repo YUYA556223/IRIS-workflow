@@ -1,0 +1,71 @@
+# ----- Rust -----
+/target
+**/target
+Cargo.lock.bak
+*.pdb
+
+# ----- Node / pnpm / Next.js -----
+node_modules
+.pnpm-store
+.next
+out
+dist
+build
+.turbo
+*.tsbuildinfo
+
+# ----- Flutter / Dart -----
+.dart_tool/
+.flutter-plugins
+.flutter-plugins-dependencies
+.packages
+.pub-cache/
+.pub/
+build/
+**/ios/Flutter/Generated.xcconfig
+**/ios/Flutter/flutter_export_environment.sh
+**/ios/Runner/GeneratedPluginRegistrant.*
+**/ios/Pods/
+**/ios/.symlinks/
+**/windows/flutter/ephemeral/
+**/windows/flutter/generated_*
+
+# ----- DB / Postgres dev -----
+*.sqlite
+*.sqlite3
+*.db
+*.db-journal
+pgdata/
+postgres-data/
+
+# ----- Env / Secrets -----
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# ----- Logs -----
+*.log
+logs/
+
+# ----- OS -----
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ----- IDE -----
+.idea/
+.vscode/*
+!.vscode/settings.json.example
+!.vscode/extensions.json
+*.swp
+*.swo
+.fleet/
+
+# ----- Coverage / Test artifacts -----
+coverage/
+*.lcov
+
+# ----- Generated / Local plans -----
+.claude-local/

@@ -1,0 +1,28 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://iris.memorylab.jp/schemas/sdui.schema.json",
+  "title": "IRIS Server-driven UI",
+  "description": "ウィジェットや通知の見た目をサーバから配信するためのコンポーネントツリースキーマ。詳細は docs/concept/06-server-driven-ui.md を参照",
+  "type": "object",
+  "required": ["id", "type", "root"],
+  "properties": {
+    "id": { "type": "string" },
+    "type": { "type": "string", "const": "ComponentTree" },
+    "root": { "$ref": "#/$defs/Component" },
+    "bindings": { "type": "object", "additionalProperties": { "type": "string" } }
+  },
+  "$defs": {
+    "Component": {
+      "type": "object",
+      "required": ["type"],
+      "properties": {
+        "type": {
+          "type": "string",
+          "enum": ["VStack", "HStack", "ZStack", "Text", "Image", "Button", "Spacer", "Divider", "List", "Toggle", "ProgressBar"]
+        },
+        "children": { "type": "array", "items": { "$ref": "#/$defs/Component" } }
+      },
+      "additionalProperties": true
+    }
+  }
+}

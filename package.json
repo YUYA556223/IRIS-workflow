@@ -1,0 +1,26 @@
+{
+  "name": "iris-workflow-monorepo",
+  "version": "0.0.0",
+  "private": true,
+  "description": "IRIS-workflow: AI-centric personal automation platform (host-local Rust backend + Flutter + Next.js).",
+  "packageManager": "pnpm@9.0.0",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "gen:plan": "node scripts/gen-plan.mjs",
+    "dev:web": "pnpm --filter web-console dev",
+    "dev:backend": "cargo run -p host-backend",
+    "build:web": "pnpm --filter web-console build",
+    "build:backend": "cargo build --release -p host-backend",
+    "fmt:rust": "cargo fmt --all",
+    "fmt:web": "pnpm --filter web-console format",
+    "lint:rust": "cargo clippy --workspace --all-targets -- -D warnings",
+    "diagrams:render": "mmdc -i docs/diagrams/infrastructure.mmd -o docs/diagrams/infrastructure.svg && mmdc -i docs/diagrams/workflow-execution.mmd -o docs/diagrams/workflow-execution.svg"
+  },
+  "devDependencies": {
+    "@mermaid-js/mermaid-cli": "^11.4.0",
+    "exceljs": "^4.4.0",
+    "ws": "^8.20.1"
+  }
+}

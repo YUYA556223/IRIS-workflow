@@ -1,0 +1,43 @@
+# IRIS-workflow サンプル: AI 出力をそのまま通知配信する最小フロー。
+#
+# 起動方法:
+#   $env:IRIS_WORKFLOWS_DIR = 'apps/host-backend/example-workflows'
+#   cargo run -p host-backend
+#
+#   curl -X POST http://127.0.0.1:8787/workflows/hello-world/run -H 'Content-Type: application/json'
+#
+# 何が起きるか:
+#   1. greet (ai)   : Claude に短い挨拶を依頼
+#   2. announce (action: builtin/notify): その出力を通知として全 WS 接続デバイスへ配信
+
+id: hello-world
+name: Hello World
+description: AI greeting → notification broadcast の最小デモ。
+
+trigger:
+  type: manual
+
+nodes:
+  - id: greet
+    type: ai
+    using: claude-code
+    with:
+      prompt: |
+        次の文字列だけを応答してください、引用符なしで:
+        Hello from IRIS-workflow!
+      permission_mode: plan
+      allowed_tools: []
+
+  - id: announce
+    type: action
+    using: builtin/notify
+    with:
+      target:
+        type: all
+      title: "Workflow says"
+      body: "{{ greet.text }}"
+      priority: normal
+
+edges:
+  - from: greet
+    to: announce

@@ -1,0 +1,144 @@
+<mxfile host="app.diagrams.net" agent="claude-code" version="24.7.17">
+  <diagram id="iris-workflow-exec" name="Workflow Execution">
+    <mxGraphModel dx="1422" dy="800" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1400" pageHeight="900" math="0" shadow="0">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+
+        <mxCell id="title" value="Workflow Execution Flow — 1本のワークフローが流れる過程" style="text;html=1;align=center;verticalAlign=middle;fontSize=20;fontStyle=1;fontColor=#1F2937;" vertex="1" parent="1">
+          <mxGeometry x="40" y="20" width="1320" height="36" as="geometry" />
+        </mxCell>
+
+        <!-- Lanes (lifelines) -->
+        <mxCell id="lane_trigger" value="Trigger Hub" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FEF3C7;strokeColor=#D97706;strokeWidth=2;fontSize=12;fontStyle=1;fontColor=#78350F;verticalAlign=top;" vertex="1" parent="1">
+          <mxGeometry x="60" y="80" width="160" height="44" as="geometry" />
+        </mxCell>
+        <mxCell id="lane_engine" value="Workflow Engine" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFE4E6;strokeColor=#BE123C;strokeWidth=2;fontSize=12;fontStyle=1;fontColor=#881337;verticalAlign=top;" vertex="1" parent="1">
+          <mxGeometry x="280" y="80" width="160" height="44" as="geometry" />
+        </mxCell>
+        <mxCell id="lane_ai" value="Claude Code Bridge" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#111827;strokeColor=#000000;strokeWidth=2;fontSize=12;fontStyle=1;fontColor=#34D399;verticalAlign=top;" vertex="1" parent="1">
+          <mxGeometry x="500" y="80" width="160" height="44" as="geometry" />
+        </mxCell>
+        <mxCell id="lane_storage" value="Storage / DB" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FECACA;strokeColor=#991B1B;strokeWidth=2;fontSize=12;fontStyle=1;fontColor=#7F1D1D;verticalAlign=top;" vertex="1" parent="1">
+          <mxGeometry x="720" y="80" width="160" height="44" as="geometry" />
+        </mxCell>
+        <mxCell id="lane_device_gw" value="Device Gateway" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#D1FAE5;strokeColor=#047857;strokeWidth=2;fontSize=12;fontStyle=1;fontColor=#064E3B;verticalAlign=top;" vertex="1" parent="1">
+          <mxGeometry x="940" y="80" width="160" height="44" as="geometry" />
+        </mxCell>
+        <mxCell id="lane_device" value="Device (iPhone/Win/IoT)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#DBEAFE;strokeColor=#1D4ED8;strokeWidth=2;fontSize=12;fontStyle=1;fontColor=#1E3A8A;verticalAlign=top;" vertex="1" parent="1">
+          <mxGeometry x="1160" y="80" width="180" height="44" as="geometry" />
+        </mxCell>
+
+        <!-- Lifelines (vertical lines) -->
+        <mxCell id="ll1" style="endArrow=none;html=1;rounded=0;strokeColor=#9CA3AF;strokeWidth=1;dashed=1;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="140" y="124" as="sourcePoint" />
+            <mxPoint x="140" y="830" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="ll2" style="endArrow=none;html=1;rounded=0;strokeColor=#9CA3AF;strokeWidth=1;dashed=1;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="360" y="124" as="sourcePoint" />
+            <mxPoint x="360" y="830" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="ll3" style="endArrow=none;html=1;rounded=0;strokeColor=#9CA3AF;strokeWidth=1;dashed=1;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="580" y="124" as="sourcePoint" />
+            <mxPoint x="580" y="830" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="ll4" style="endArrow=none;html=1;rounded=0;strokeColor=#9CA3AF;strokeWidth=1;dashed=1;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="800" y="124" as="sourcePoint" />
+            <mxPoint x="800" y="830" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="ll5" style="endArrow=none;html=1;rounded=0;strokeColor=#9CA3AF;strokeWidth=1;dashed=1;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="1020" y="124" as="sourcePoint" />
+            <mxPoint x="1020" y="830" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="ll6" style="endArrow=none;html=1;rounded=0;strokeColor=#9CA3AF;strokeWidth=1;dashed=1;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="1250" y="124" as="sourcePoint" />
+            <mxPoint x="1250" y="830" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+
+        <!-- Sequence steps -->
+        <mxCell id="s1" value="1. cron / webhook 着火" style="endArrow=classic;html=1;rounded=0;strokeColor=#D97706;strokeWidth=2;fontSize=11;fontColor=#78350F;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="140" y="160" as="sourcePoint" />
+            <mxPoint x="360" y="160" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+
+        <mxCell id="s2" value="2. WorkflowExecution レコード作成" style="endArrow=classic;html=1;rounded=0;strokeColor=#991B1B;strokeWidth=2;fontSize=11;fontColor=#7F1D1D;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="360" y="210" as="sourcePoint" />
+            <mxPoint x="800" y="210" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+
+        <mxCell id="s3" value="3. ai ノード起動 (session-id 生成)" style="endArrow=classic;html=1;rounded=0;strokeColor=#BE123C;strokeWidth=2;fontSize=11;fontColor=#881337;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="360" y="270" as="sourcePoint" />
+            <mxPoint x="580" y="270" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+
+        <mxCell id="s4" value="4. spawn `claude` (stream-json)" style="endArrow=classic;html=1;rounded=0;strokeColor=#374151;strokeWidth=2;fontSize=11;fontColor=#374151;dashed=1;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="580" y="320" as="sourcePoint" />
+            <mxPoint x="580" y="370" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+
+        <mxCell id="s5" value="5. assistant_delta / tool_use イベント" style="endArrow=classic;html=1;rounded=0;strokeColor=#34D399;strokeWidth=2;fontSize=11;fontColor=#047857;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="580" y="410" as="sourcePoint" />
+            <mxPoint x="360" y="410" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+
+        <mxCell id="s6" value="6. 結果を変数バインディング → 次ノード" style="endArrow=classic;html=1;rounded=0;strokeColor=#BE123C;strokeWidth=2;fontSize=11;fontColor=#881337;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="360" y="470" as="sourcePoint" />
+            <mxPoint x="360" y="520" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+
+        <mxCell id="s7" value="7. action ノード → SDUI 仕様生成" style="endArrow=classic;html=1;rounded=0;strokeColor=#BE123C;strokeWidth=2;fontSize=11;fontColor=#881337;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="360" y="560" as="sourcePoint" />
+            <mxPoint x="1020" y="560" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+
+        <mxCell id="s8" value="8. WS push (SDUI patch)" style="endArrow=classic;html=1;rounded=0;strokeColor=#047857;strokeWidth=2;fontSize=11;fontColor=#064E3B;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="1020" y="620" as="sourcePoint" />
+            <mxPoint x="1250" y="620" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+
+        <mxCell id="s9" value="9. レンダ → widget 更新" style="endArrow=classic;html=1;rounded=0;strokeColor=#1D4ED8;strokeWidth=2;fontSize=11;fontColor=#1E3A8A;dashed=1;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="1250" y="660" as="sourcePoint" />
+            <mxPoint x="1250" y="700" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+
+        <mxCell id="s10" value="10. 実行ログ append (success)" style="endArrow=classic;html=1;rounded=0;strokeColor=#991B1B;strokeWidth=2;fontSize=11;fontColor=#7F1D1D;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="360" y="750" as="sourcePoint" />
+            <mxPoint x="800" y="750" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>
