@@ -1,4 +1,5 @@
 use std::path::Path;
+use std::sync::Arc;
 
 use dashmap::DashMap;
 
@@ -6,11 +7,12 @@ use super::dsl::Workflow;
 
 /// ロード済みワークフローの in-memory レジストリ。
 ///
-/// YAML ファイル群が source of truth で、`POST /workflows` で上書きされた
-/// 場合はメモリのみに保持される (将来: ファイルへ書き戻すオプション)。
+/// 内部は `Arc<Workflow>` で保持し、`get` / `list` は cheap clone を返す。
+/// これにより cron/fs/mqtt/webhook 起動のたびに発生していた `Workflow` の
+/// deep clone を排除できる。
 #[derive(Default)]
 pub struct WorkflowStore {
-    inner: DashMap<String, Workflow>,
+    inner: DashMap<String, Arc<Workflow>>,
 }
 
 impl WorkflowStore {
@@ -18,18 +20,18 @@ impl WorkflowStore {
         Self::default()
     }
 
-    pub fn list(&self) -> Vec<Workflow> {
+    pub fn list(&self) -> Vec<Arc<Workflow>> {
         let mut v: Vec<_> = self.inner.iter().map(|e| e.value().clone()).collect();
         v.sort_by(|a, b| a.id.cmp(&b.id));
         v
     }
 
-    pub fn get(&self, id: &str) -> Option<Workflow> {
+    pub fn get(&self, id: &str) -> Option<Arc<Workflow>> {
         self.inner.get(id).map(|e| e.value().clone())
     }
 
     pub fn upsert(&self, wf: Workflow) {
-        self.inner.insert(wf.id.clone(), wf);
+        self.inner.insert(wf.id.clone(), Arc::new(wf));
     }
 
     pub fn delete(&self, id: &str) -> bool {
@@ -42,7 +44,7 @@ impl WorkflowStore {
         let workflows = super::loader::load_dir(dir)?;
         let count = workflows.len();
         for wf in workflows {
-            self.inner.insert(wf.id.clone(), wf);
+            self.inner.insert(wf.id.clone(), Arc::new(wf));
         }
         Ok(count)
     }

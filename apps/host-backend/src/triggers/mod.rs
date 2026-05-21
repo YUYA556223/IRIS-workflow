@@ -22,7 +22,7 @@ use notify::Watcher;
 use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
 
-use crate::mqtt::{topic_matches, MqttBus};
+use crate::mqtt::MqttBus;
 use crate::workflow::{Trigger, Workflow, WorkflowExecutor, WorkflowStore};
 
 /// 内部状態。`sync()` で全置換する。
@@ -171,7 +171,7 @@ impl TriggerHub {
 
 fn spawn_cron(
     executor: Arc<WorkflowExecutor>,
-    workflow: Workflow,
+    workflow: Arc<Workflow>,
     schedule_str: &str,
 ) -> anyhow::Result<JoinHandle<()>> {
     let schedule = Schedule::from_str(schedule_str)?;
@@ -188,7 +188,6 @@ fn spawn_cron(
             let dur = match (next - now).to_std() {
                 Ok(d) => d,
                 Err(_) => {
-                    // 過去時刻 — 少し休んで次へ
                     tokio::time::sleep(Duration::from_millis(500)).await;
                     continue;
                 }
@@ -201,10 +200,7 @@ fn spawn_cron(
                 "schedule": schedule_label,
                 "fired_at": Utc::now().to_rfc3339(),
             });
-            let result = executor
-                .clone()
-                .execute(workflow.clone(), trigger_data)
-                .await;
+            let result = executor.clone().execute(workflow.clone(), trigger_data).await;
             tracing::info!(
                 workflow_id = %workflow.id,
                 execution_id = %result.execution_id,
@@ -220,22 +216,18 @@ fn spawn_cron(
 
 fn spawn_fs_watch(
     executor: Arc<WorkflowExecutor>,
-    workflow: Workflow,
+    workflow: Arc<Workflow>,
     path: &str,
 ) -> anyhow::Result<FsTask> {
     let watch_path = Path::new(path).to_path_buf();
-    if !watch_path.exists() {
-        anyhow::bail!("fs-watch path does not exist: {}", watch_path.display());
-    }
-
     let (tx, mut rx) = tokio::sync::mpsc::channel::<notify::Event>(100);
 
     let mut watcher = notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
         if let Ok(ev) = res {
-            // 同期コールバックなので blocking_send。
             let _ = tx.blocking_send(ev);
         }
     })?;
+    // 存在しないパスは watcher.watch が NotFound エラーで弾く (事前 exists チェックは TOCTOU)。
     watcher.watch(&watch_path, notify::RecursiveMode::Recursive)?;
 
     let workflow_id = workflow.id.clone();
@@ -247,10 +239,7 @@ fn spawn_fs_watch(
                 "paths": ev.paths.iter().map(|p| p.display().to_string()).collect::<Vec<_>>(),
                 "fired_at": Utc::now().to_rfc3339(),
             });
-            let result = executor
-                .clone()
-                .execute(workflow.clone(), trigger_data)
-                .await;
+            let result = executor.clone().execute(workflow.clone(), trigger_data).await;
             tracing::info!(
                 workflow_id = %workflow.id,
                 execution_id = %result.execution_id,
@@ -269,7 +258,7 @@ fn spawn_fs_watch(
 
 async fn spawn_mqtt(
     executor: Arc<WorkflowExecutor>,
-    workflow: Workflow,
+    workflow: Arc<Workflow>,
     bus: Arc<MqttBus>,
     topic_filter: String,
 ) -> anyhow::Result<JoinHandle<()>> {
@@ -280,29 +269,37 @@ async fn spawn_mqtt(
         loop {
             match rx.recv().await {
                 Ok(msg) => {
-                    if !topic_matches(&topic_filter, &msg.topic) {
+                    if !rumqttc::matches(&msg.topic, &topic_filter) {
                         continue;
                     }
-                    let trigger_data = serde_json::json!({
-                        "trigger": "mqtt",
-                        "topic": msg.topic,
-                        "payload": msg.payload_str.clone()
-                            .map(serde_json::Value::String)
-                            .unwrap_or(serde_json::Value::Null),
-                        "qos": msg.qos,
-                        "fired_at": Utc::now().to_rfc3339(),
-                    });
-                    let result = executor
+                    // workflow 実行はメッセージ毎に独立 spawn して、subscriber ループが
+                    // 詰まらないようにする (バックプレッシャは broadcast の Lagged で吸収)。
+                    let executor = executor.clone();
+                    let workflow = workflow.clone();
+                    let topic = msg.topic.clone();
+                    let payload = msg
+                        .payload_str
                         .clone()
-                        .execute(workflow.clone(), trigger_data)
-                        .await;
-                    tracing::info!(
-                        workflow_id = %workflow.id,
-                        topic = %msg.topic,
-                        execution_id = %result.execution_id,
-                        status = ?result.status,
-                        "mqtt-triggered execution finished"
-                    );
+                        .map(serde_json::Value::String)
+                        .unwrap_or(serde_json::Value::Null);
+                    let qos = msg.qos;
+                    tokio::spawn(async move {
+                        let trigger_data = serde_json::json!({
+                            "trigger": "mqtt",
+                            "topic": topic,
+                            "payload": payload,
+                            "qos": qos,
+                            "fired_at": Utc::now().to_rfc3339(),
+                        });
+                        let result = executor.execute(workflow.clone(), trigger_data).await;
+                        tracing::info!(
+                            workflow_id = %workflow.id,
+                            topic = %topic,
+                            execution_id = %result.execution_id,
+                            status = ?result.status,
+                            "mqtt-triggered execution finished"
+                        );
+                    });
                 }
                 Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
                     tracing::warn!(lagged = n, "mqtt subscriber lagged");

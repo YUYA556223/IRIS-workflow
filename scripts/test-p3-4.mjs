@@ -1,24 +1,7 @@
 #!/usr/bin/env node
 // E2E for P3.4: when / retry / secrets / sub-workflow.
 
-const BASE = "http://127.0.0.1:8787";
-
-async function http(method, path, body) {
-  const res = await fetch(`${BASE}${path}`, {
-    method,
-    headers: { "Content-Type": "application/json" },
-    body: body !== undefined ? JSON.stringify(body) : undefined,
-  });
-  if (res.status === 204) return { status: 204, body: null };
-  return { status: res.status, body: await res.json() };
-}
-
-function assert(cond, msg) {
-  if (!cond) {
-    console.error("FAIL:", msg);
-    process.exit(1);
-  }
-}
+import { http, assert } from "./_helpers.mjs";
 
 async function main() {
   // ===== 1. node.when conditional =====

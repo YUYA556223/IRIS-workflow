@@ -7,6 +7,9 @@
 //! - `IRIS_MQTT_BROKER` (例: `tcp://127.0.0.1:1883`) を設定すると有効化
 //! - `trigger: { type: mqtt, topic: "..." }` で workflow を起動
 //! - `action: builtin/mqtt-publish` でメッセージ送信
+//!
+//! Topic wildcard マッチング (`+`, `#`) は `rumqttc::matches(topic, filter)` を使う
+//! (自前実装は重複を避けて削除済)。
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -31,7 +34,6 @@ pub struct MqttBus {
 
 impl MqttBus {
     /// ブローカに接続し、eventloop を回す background task を spawn する。
-    /// 接続失敗時はエラーを返す (タスクは再接続を rumqttc に任せる)。
     pub async fn connect(broker_url: &str, client_id: &str) -> anyhow::Result<Arc<Self>> {
         let (host, port) = parse_broker_url(broker_url)?;
         let mut options = MqttOptions::new(client_id, host.clone(), port);
@@ -51,7 +53,7 @@ impl MqttBus {
     }
 
     /// 指定トピックを SUBSCRIBE し、全 incoming メッセージを受信する Receiver を返す。
-    /// 受信側で topic マッチを自前フィルタする (broadcast の特性上、全 sub 共通)。
+    /// 受信側で `rumqttc::matches` フィルタを当てる (broadcast の特性上、全 sub 共通)。
     pub async fn subscribe(&self, topic: &str) -> anyhow::Result<broadcast::Receiver<MqttMessage>> {
         self.client
             .subscribe(topic, QoS::AtMostOnce)
@@ -74,38 +76,8 @@ impl MqttBus {
     }
 }
 
-/// MQTT topic wildcard マッチ。`+` (単一階層), `#` (末尾複数階層) をサポート。
-pub fn topic_matches(filter: &str, topic: &str) -> bool {
-    let f_parts: Vec<&str> = filter.split('/').collect();
-    let t_parts: Vec<&str> = topic.split('/').collect();
-    let mut fi = 0;
-    let mut ti = 0;
-    while fi < f_parts.len() {
-        match f_parts[fi] {
-            "#" => return true,
-            "+" => {
-                if ti >= t_parts.len() {
-                    return false;
-                }
-            }
-            literal => {
-                if ti >= t_parts.len() || t_parts[ti] != literal {
-                    return false;
-                }
-            }
-        }
-        fi += 1;
-        ti += 1;
-    }
-    ti == t_parts.len()
-}
-
 fn parse_broker_url(url: &str) -> anyhow::Result<(String, u16)> {
-    // 受け付ける形式:
-    //   tcp://host:port
-    //   mqtt://host:port
-    //   host:port
-    //   host (default port 1883)
+    // 受け付ける形式: `tcp://host:port`, `mqtt://host:port`, `host:port`, `host`.
     let stripped = url
         .strip_prefix("tcp://")
         .or_else(|| url.strip_prefix("mqtt://"))
@@ -128,13 +100,14 @@ async fn eventloop_task(mut eventloop: EventLoop, tx: broadcast::Sender<MqttMess
     loop {
         match eventloop.poll().await {
             Ok(Event::Incoming(Incoming::Publish(p))) => {
-                let payload_vec = p.payload.to_vec();
-                let payload_str = std::str::from_utf8(&payload_vec)
-                    .ok()
-                    .map(|s| s.to_owned());
+                // UTF-8 valid なら String を 1 回だけ確保し、bytes はそこから派生させる。
+                let (payload, payload_str) = match String::from_utf8(p.payload.to_vec()) {
+                    Ok(s) => (s.as_bytes().to_vec(), Some(s)),
+                    Err(e) => (e.into_bytes(), None),
+                };
                 let msg = MqttMessage {
                     topic: p.topic.clone(),
-                    payload: payload_vec,
+                    payload,
                     payload_str,
                     qos: p.qos as u8,
                 };
@@ -149,31 +122,5 @@ async fn eventloop_task(mut eventloop: EventLoop, tx: broadcast::Sender<MqttMess
                 tokio::time::sleep(Duration::from_secs(2)).await;
             }
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::topic_matches;
-
-    #[test]
-    fn exact() {
-        assert!(topic_matches("home/light", "home/light"));
-        assert!(!topic_matches("home/light", "home/door"));
-    }
-
-    #[test]
-    fn plus_wildcard() {
-        assert!(topic_matches("home/+/state", "home/light/state"));
-        assert!(topic_matches("home/+/state", "home/door/state"));
-        assert!(!topic_matches("home/+/state", "home/state"));
-        assert!(!topic_matches("home/+/state", "home/light/x"));
-    }
-
-    #[test]
-    fn hash_wildcard() {
-        assert!(topic_matches("home/#", "home/light/state"));
-        assert!(topic_matches("home/#", "home"));
-        assert!(!topic_matches("garage/#", "home/light"));
     }
 }

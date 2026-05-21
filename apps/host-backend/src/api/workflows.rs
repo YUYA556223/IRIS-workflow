@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use axum::{
     extract::{Path, State},
     http::StatusCode,
@@ -19,7 +21,7 @@ pub fn router() -> Router<AppState> {
         .route("/workflows/:id/run", post(run))
 }
 
-async fn list(State(s): State<AppState>) -> AppResult<Json<Vec<Workflow>>> {
+async fn list(State(s): State<AppState>) -> AppResult<Json<Vec<Arc<Workflow>>>> {
     Ok(Json(s.workflows.list()))
 }
 
@@ -31,7 +33,9 @@ async fn upsert(
         return Err(AppError::BadRequest("workflow id must not be empty".into()));
     }
     if wf.nodes.is_empty() {
-        return Err(AppError::BadRequest("workflow must have at least one node".into()));
+        return Err(AppError::BadRequest(
+            "workflow must have at least one node".into(),
+        ));
     }
     s.workflows.upsert(wf.clone());
     s.triggers.sync().await;
@@ -42,7 +46,7 @@ async fn upsert(
 async fn fetch(
     State(s): State<AppState>,
     Path(id): Path<String>,
-) -> AppResult<Json<Workflow>> {
+) -> AppResult<Json<Arc<Workflow>>> {
     s.workflows.get(&id).map(Json).ok_or(AppError::NotFound)
 }
 

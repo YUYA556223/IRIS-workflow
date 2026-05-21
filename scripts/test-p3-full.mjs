@@ -13,33 +13,7 @@
 //   3. Execution history API: GET /executions, /executions/:id, /workflows/:id/executions
 //   4. Persistence: list returns the executions we just ran
 
-const BASE = "http://127.0.0.1:8787";
-
-async function http(method, path, body) {
-  const res = await fetch(`${BASE}${path}`, {
-    method,
-    headers: { "Content-Type": "application/json" },
-    body: body !== undefined ? JSON.stringify(body) : undefined,
-  });
-  const text = await res.text();
-  let parsed;
-  try {
-    parsed = JSON.parse(text);
-  } catch {
-    parsed = text;
-  }
-  if (!res.ok) {
-    throw new Error(`HTTP ${res.status} ${method} ${path}: ${text}`);
-  }
-  return { status: res.status, body: parsed };
-}
-
-function assert(cond, msg) {
-  if (!cond) {
-    console.error("FAIL:", msg);
-    process.exit(1);
-  }
-}
+import { http, assert } from "./_helpers.mjs";
 
 async function main() {
   // ============ 1. Webhook trigger ============

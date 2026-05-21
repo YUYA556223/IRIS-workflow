@@ -6,24 +6,7 @@
 //   - mosquitto running on 1883 (docker compose -f infra/docker/docker-compose.yml up -d mosquitto)
 //   - Node `mqtt` package (will install on demand)
 
-const BASE = "http://127.0.0.1:8787";
-
-async function http(method, path, body) {
-  const res = await fetch(`${BASE}${path}`, {
-    method,
-    headers: { "Content-Type": "application/json" },
-    body: body !== undefined ? JSON.stringify(body) : undefined,
-  });
-  if (res.status === 204) return { status: 204, body: null };
-  return { status: res.status, body: await res.json() };
-}
-
-function assert(cond, msg) {
-  if (!cond) {
-    console.error("FAIL:", msg);
-    process.exit(1);
-  }
-}
+import { http, assert } from "./_helpers.mjs";
 
 async function main() {
   let mqtt;

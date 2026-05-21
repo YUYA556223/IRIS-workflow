@@ -13,14 +13,14 @@ use uuid::Uuid;
 use crate::{
     ai::{ClaudeService, SpawnOptions},
     delivery::DeliveryHub,
-    domain::{notification::DispatchNotification, target::DeliveryTarget, SduiSpec, WidgetId},
+    domain::{notification::DispatchNotification, SduiSpec, WidgetId},
     mqtt::MqttBus,
     storage::{executions::ExecutionRepo, SduiRepo, WidgetRepo},
 };
 
 use super::{
     dag::topo_sort,
-    dsl::{BackoffStrategy, Node, NodeType, RetryPolicy, Workflow},
+    dsl::{BackoffStrategy, Node, NodeType, Workflow},
     store::WorkflowStore,
     template::{render_string, render_value, TemplateContext},
 };
@@ -118,7 +118,7 @@ impl WorkflowExecutor {
     /// 実行終了後に `ExecutionRepo` へ自動保存される。
     pub fn execute(
         self: Arc<Self>,
-        workflow: Workflow,
+        workflow: Arc<Workflow>,
         trigger_data: Value,
     ) -> Pin<Box<dyn Future<Output = ExecutionResult> + Send>> {
         self.execute_at_depth(workflow, trigger_data, 0)
@@ -128,7 +128,7 @@ impl WorkflowExecutor {
     /// 自己再帰時に型が無限サイズになるのを防いでいる。
     fn execute_at_depth(
         self: Arc<Self>,
-        workflow: Workflow,
+        workflow: Arc<Workflow>,
         trigger_data: Value,
         depth: usize,
     ) -> Pin<Box<dyn Future<Output = ExecutionResult> + Send>> {
@@ -174,7 +174,7 @@ impl WorkflowExecutor {
                 }
             };
 
-            // 2. in-degree と隣接リスト
+            // 2. in-degree と隣接リスト + ノード ID → &Node の O(1) ルックアップ表
             let mut in_degree: HashMap<String, usize> = workflow
                 .nodes
                 .iter()
@@ -188,6 +188,11 @@ impl WorkflowExecutor {
                     .or_default()
                     .push(edge.to.clone());
             }
+            let nodes_by_id: HashMap<&str, &Node> = workflow
+                .nodes
+                .iter()
+                .map(|n| (n.id.as_str(), n))
+                .collect();
 
             let mut outputs: HashMap<String, Value> = HashMap::new();
             let mut tainted: HashSet<String> = HashSet::new();
@@ -205,56 +210,28 @@ impl WorkflowExecutor {
                 let mut joinset: JoinSet<NodeOutcome> = JoinSet::new();
 
                 for node_id in &current_wave {
-                    let node = match workflow.nodes.iter().find(|n| &n.id == node_id) {
-                        Some(n) => n.clone(),
-                        None => continue,
+                    let Some(node_ref) = nodes_by_id.get(node_id.as_str()) else {
+                        continue;
                     };
+                    let node = (*node_ref).clone();
 
                     if tainted.contains(node_id) {
-                        let now = Utc::now();
-                        completed.insert(
-                            node.id.clone(),
-                            NodeExecution {
-                                node_id: node.id.clone(),
-                                kind: node.kind,
-                                status: NodeStatus::Skipped,
-                                started_at: now,
-                                finished_at: now,
-                                output: Value::Null,
-                                error: None,
-                                attempts: 0,
-                            },
-                        );
+                        completed.insert(node.id.clone(), skipped_node(&node));
                         continue;
                     }
 
-                    // テンプレート展開
                     let ctx = TemplateContext {
                         trigger: &trigger_data,
                         outputs: &outputs,
                     };
 
-                    // `when` が指定されていれば先に評価。falsy なら Skipped で下流継続。
+                    // `when` 評価。falsy なら Skipped で下流継続 (taint しない)。
                     if let Some(cond_template) = &node.when {
                         match render_string(cond_template, &ctx) {
                             Ok(s) => {
                                 if !is_truthy(&s) {
-                                    let now = Utc::now();
-                                    completed.insert(
-                                        node.id.clone(),
-                                        NodeExecution {
-                                            node_id: node.id.clone(),
-                                            kind: node.kind,
-                                            status: NodeStatus::Skipped,
-                                            started_at: now,
-                                            finished_at: now,
-                                            output: Value::Null,
-                                            error: None,
-                                            attempts: 0,
-                                        },
-                                    );
-                                    // when=false は失敗ではない → outputs に Null を入れて
-                                    // 下流が `{{ <node>.x }}` を参照しても "" になるだけ。
+                                    completed.insert(node.id.clone(), skipped_node(&node));
+                                    // 下流が `{{ <node>.x }}` を参照しても "" になるよう Null を残す。
                                     outputs.insert(node.id.clone(), Value::Null);
                                     continue;
                                 }
@@ -262,19 +239,9 @@ impl WorkflowExecutor {
                             Err(e) => {
                                 overall_failed = true;
                                 taint_downstream(&node.id, &adjacency, &mut tainted);
-                                let now = Utc::now();
                                 completed.insert(
                                     node.id.clone(),
-                                    NodeExecution {
-                                        node_id: node.id.clone(),
-                                        kind: node.kind,
-                                        status: NodeStatus::Failed,
-                                        started_at: now,
-                                        finished_at: now,
-                                        output: Value::Null,
-                                        error: Some(format!("when: {}", e)),
-                                        attempts: 0,
-                                    },
+                                    pre_dispatch_failed(&node, format!("when: {}", e)),
                                 );
                                 continue;
                             }
@@ -286,31 +253,14 @@ impl WorkflowExecutor {
                         Err(e) => {
                             overall_failed = true;
                             taint_downstream(&node.id, &adjacency, &mut tainted);
-                            let now = Utc::now();
                             completed.insert(
                                 node.id.clone(),
-                                NodeExecution {
-                                    node_id: node.id.clone(),
-                                    kind: node.kind,
-                                    status: NodeStatus::Failed,
-                                    started_at: now,
-                                    finished_at: now,
-                                    output: Value::Null,
-                                    error: Some(format!("template: {}", e)),
-                                    attempts: 0,
-                                },
+                                pre_dispatch_failed(&node, format!("template: {}", e)),
                             );
                             continue;
                         }
                     };
 
-                    // spawn — リトライポリシーをラップ
-                    let claude = self.claude.clone();
-                    let delivery = self.delivery.clone();
-                    let widgets = self.widgets.clone();
-                    let sdui = self.sdui.clone();
-                    let workflows_store = self.workflows.clone();
-                    let mqtt_bus = self.mqtt.clone();
                     let executor_arc = Arc::clone(&self);
                     let retry = node.retry.clone();
                     joinset.spawn(async move {
@@ -319,23 +269,19 @@ impl WorkflowExecutor {
                         let delay_ms = retry.as_ref().map(|r| r.delay_ms).unwrap_or(0);
                         let backoff = retry.as_ref().map(|r| r.backoff).unwrap_or_default();
 
+                        // `rendered` は最終 attempt で move、それ以前は clone。
+                        // max_attempts==1 (リトライなし) の場合は 1 回も clone しない。
+                        let mut buf = Some(rendered);
                         let mut last_err: Option<anyhow::Error> = None;
                         let mut attempts: u32 = 0;
                         for attempt in 1..=max_attempts {
                             attempts = attempt;
-                            let result = run_node_dispatch(
-                                &node,
-                                rendered.clone(),
-                                &claude,
-                                &delivery,
-                                widgets.as_ref(),
-                                sdui.as_ref(),
-                                mqtt_bus.as_ref(),
-                                &executor_arc,
-                                &workflows_store,
-                                depth,
-                            )
-                            .await;
+                            let with = if attempt == max_attempts {
+                                buf.take().expect("present until last attempt")
+                            } else {
+                                buf.as_ref().expect("present").clone()
+                            };
+                            let result = run_node_on(&executor_arc, &node, with, depth).await;
                             match result {
                                 Ok(output) => {
                                     return NodeOutcome {
@@ -513,34 +459,77 @@ fn taint_downstream(
     }
 }
 
-/// `when` 評価ロジック。
+/// `when` 評価ロジック。trimmed (case-insensitive) で
+/// `""` / `"false"` / `"no"` / `"0"` / `"null"` / `"off"` のいずれかなら falsy。
 fn is_truthy(s: &str) -> bool {
     let trimmed = s.trim();
-    !matches!(
-        trimmed.to_ascii_lowercase().as_str(),
-        "" | "false" | "no" | "0" | "null" | "off"
-    )
+    if trimmed.is_empty() {
+        return false;
+    }
+    !["false", "no", "0", "null", "off"]
+        .iter()
+        .any(|f| trimmed.eq_ignore_ascii_case(f))
 }
 
-#[allow(clippy::too_many_arguments)]
-async fn run_node_dispatch(
+/// Pre-dispatch で「実行はせず完了状態に置く」ノードの NodeExecution を作る共通形。
+fn skipped_node(node: &Node) -> NodeExecution {
+    let now = Utc::now();
+    NodeExecution {
+        node_id: node.id.clone(),
+        kind: node.kind,
+        status: NodeStatus::Skipped,
+        started_at: now,
+        finished_at: now,
+        output: Value::Null,
+        error: None,
+        attempts: 0,
+    }
+}
+
+fn pre_dispatch_failed(node: &Node, error: String) -> NodeExecution {
+    let now = Utc::now();
+    NodeExecution {
+        node_id: node.id.clone(),
+        kind: node.kind,
+        status: NodeStatus::Failed,
+        started_at: now,
+        finished_at: now,
+        output: Value::Null,
+        error: Some(error),
+        attempts: 0,
+    }
+}
+
+/// 単一ノードを実行する。`executor` 経由でサブ依存 (Arc 群) にアクセスする。
+async fn run_node_on(
+    executor: &Arc<WorkflowExecutor>,
     node: &Node,
     with: Value,
-    claude: &ClaudeService,
-    delivery: &DeliveryHub,
-    widgets: &dyn WidgetRepo,
-    sdui: &dyn SduiRepo,
-    mqtt: Option<&Arc<MqttBus>>,
-    executor: &Arc<WorkflowExecutor>,
-    workflows: &Arc<WorkflowStore>,
     depth: usize,
 ) -> anyhow::Result<Value> {
     match node.kind {
-        NodeType::Ai => run_ai_node(node, with, claude).await,
-        NodeType::Action => run_action_node(node, with, delivery, widgets, sdui, mqtt).await,
+        NodeType::Ai => run_ai_node(node, with, &executor.claude).await,
+        NodeType::Action => {
+            run_action_node(
+                node,
+                with,
+                &executor.delivery,
+                executor.widgets.as_ref(),
+                executor.sdui.as_ref(),
+                executor.mqtt.as_ref(),
+            )
+            .await
+        }
         NodeType::Transform => run_transform_node(node, with).await,
         NodeType::Workflow => {
-            run_workflow_node(node, with, executor.clone(), workflows.clone(), depth).await
+            run_workflow_node(
+                node,
+                with,
+                executor.clone(),
+                executor.workflows.clone(),
+                depth,
+            )
+            .await
         }
     }
 }
@@ -625,33 +614,23 @@ async fn run_action_node(
             Ok(serde_json::json!({ "spec_id": spec.id }))
         }
         "builtin/broadcast-target" => {
-            let params: BroadcastParams =
+            // notify とフィールドが完全に同じになったため alias。priority は default 扱い。
+            let req: DispatchNotification =
                 serde_json::from_value(with).context("broadcast params")?;
-            let receivers =
-                delivery.dispatch_notification(crate::domain::notification::Notification {
-                    id: crate::domain::notification::NotificationId::new(),
-                    target: params.target,
-                    title: params.title,
-                    body: params.body,
-                    priority: Default::default(),
-                    data: params.data,
-                    created_at: Utc::now(),
-                });
-            Ok(serde_json::json!({ "receivers": receivers }))
+            let notif = req.into_notification();
+            let receivers = delivery.dispatch_notification(notif.clone());
+            Ok(serde_json::json!({
+                "notification_id": notif.id,
+                "receivers": receivers,
+            }))
         }
         "builtin/fail" => {
-            // テスト用: 必ず失敗するアクション。リトライ検証で使う。
             let params: FailParams =
                 serde_json::from_value(with).unwrap_or(FailParams { reason: None });
             anyhow::bail!(
                 "builtin/fail invoked: {}",
                 params.reason.unwrap_or_else(|| "intentional".into())
             )
-        }
-        "builtin/fail-once" => {
-            // テスト用: 各 attempt で「2回目以降は成功」のセマンティクス。
-            // 単純に成功を返すバージョン (リトライ完了確認用)。
-            Ok(serde_json::json!({ "tried": true }))
         }
         "builtin/mqtt-publish" => {
             let bus = mqtt.ok_or_else(|| {
@@ -703,7 +682,7 @@ async fn run_workflow_node(
 ) -> anyhow::Result<Value> {
     let params: WorkflowNodeParams =
         serde_json::from_value(with).context("workflow node params")?;
-    let sub_wf = workflows
+    let sub_wf: Arc<Workflow> = workflows
         .get(&params.workflow_id)
         .ok_or_else(|| anyhow::anyhow!("sub-workflow not found: '{}'", params.workflow_id))?;
     tracing::info!(
@@ -754,15 +733,6 @@ struct WidgetUpdateParams {
 }
 
 #[derive(Debug, Deserialize)]
-struct BroadcastParams {
-    target: DeliveryTarget,
-    title: String,
-    body: String,
-    #[serde(default)]
-    data: Option<Value>,
-}
-
-#[derive(Debug, Deserialize)]
 struct FailParams {
     #[serde(default)]
     reason: Option<String>,
@@ -784,8 +754,3 @@ struct MqttPublishParams {
     #[serde(default)]
     pub retain: bool,
 }
-
-// `RetryPolicy` を `unused_must_use` 経由でリファクタ警告に振らせないために
-// `_` 参照しておく必要が将来出てきたらここに。
-#[allow(dead_code)]
-fn _retry_marker(_: RetryPolicy) {}

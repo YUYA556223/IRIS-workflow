@@ -5,23 +5,7 @@
 // 2. Permission flow: WS subscribe → POST /permission/request → catch the
 //    broadcast → POST /permission/respond → verify the request resolves.
 
-const BASE = "http://127.0.0.1:8787";
-
-function assert(cond, msg) {
-  if (!cond) {
-    console.error("FAIL:", msg);
-    process.exit(1);
-  }
-}
-
-async function http(method, path, body) {
-  const res = await fetch(`${BASE}${path}`, {
-    method,
-    headers: { "Content-Type": "application/json" },
-    body: body !== undefined ? JSON.stringify(body) : undefined,
-  });
-  return { status: res.status, body: await res.json() };
-}
+import { BASE, http, assert } from "./_helpers.mjs";
 
 async function main() {
   // ===== 1. SSE =====
