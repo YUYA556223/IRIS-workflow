@@ -16,6 +16,10 @@ pub struct Config {
     pub workflows_dir: Option<PathBuf>,
     /// permission-prompt 応答待ちのタイムアウト (秒)。
     pub permission_timeout_secs: u64,
+    /// MQTT ブローカ URL (例: `tcp://127.0.0.1:1883`)。未設定なら MQTT 機能無効。
+    pub mqtt_broker: Option<String>,
+    /// MQTT クライアント識別子。
+    pub mqtt_client_id: String,
 }
 
 impl Default for Config {
@@ -58,6 +62,14 @@ impl Config {
             .and_then(|s| s.parse().ok())
             .unwrap_or(120);
 
+        let mqtt_broker = std::env::var("IRIS_MQTT_BROKER")
+            .ok()
+            .filter(|s| !s.is_empty());
+        let mqtt_client_id = std::env::var("IRIS_MQTT_CLIENT_ID")
+            .ok()
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| format!("iris-host-{}", &uuid::Uuid::new_v4().to_string()[..8]));
+
         Self {
             bind,
             delivery_capacity,
@@ -66,6 +78,8 @@ impl Config {
             ai_timeout_secs,
             workflows_dir,
             permission_timeout_secs,
+            mqtt_broker,
+            mqtt_client_id,
         }
     }
 }

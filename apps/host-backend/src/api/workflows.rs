@@ -66,6 +66,6 @@ async fn run(
     let workflow = s.workflows.get(&id).ok_or(AppError::NotFound)?;
     let trigger_data = body.map(|Json(v)| v).unwrap_or(Value::Null);
     tracing::info!(workflow_id = %id, "workflow run requested");
-    let result = s.executor.execute(&workflow, trigger_data).await;
+    let result = s.executor.clone().execute(workflow, trigger_data).await;
     Ok(Json(result))
 }

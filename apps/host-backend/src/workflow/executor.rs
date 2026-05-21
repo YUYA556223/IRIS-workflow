@@ -1,8 +1,10 @@
 use std::collections::{HashMap, HashSet};
+use std::pin::Pin;
 use std::sync::Arc;
 
 use anyhow::Context;
 use chrono::{DateTime, Utc};
+use futures::Future;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio::task::JoinSet;
@@ -12,14 +14,19 @@ use crate::{
     ai::{ClaudeService, SpawnOptions},
     delivery::DeliveryHub,
     domain::{notification::DispatchNotification, target::DeliveryTarget, SduiSpec, WidgetId},
+    mqtt::MqttBus,
     storage::{executions::ExecutionRepo, SduiRepo, WidgetRepo},
 };
 
 use super::{
     dag::topo_sort,
-    dsl::{Node, NodeType, Workflow},
-    template::{render_value, TemplateContext},
+    dsl::{BackoffStrategy, Node, NodeType, RetryPolicy, Workflow},
+    store::WorkflowStore,
+    template::{render_string, render_value, TemplateContext},
 };
+
+/// サブワークフロー再帰の安全限界。これを超えると即 Failed。
+const MAX_SUBWORKFLOW_DEPTH: usize = 16;
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, sqlx::Type, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
@@ -47,6 +54,13 @@ pub struct NodeExecution {
     pub output: Value,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    /// このノードで実行された試行回数 (リトライ込み)。
+    #[serde(default = "default_attempts")]
+    pub attempts: u32,
+}
+
+fn default_attempts() -> u32 {
+    1
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -66,25 +80,28 @@ pub struct ExecutionResult {
 
 /// ワークフローを 1 回実行するエンジン。
 ///
-/// ノードは「波 (wave)」単位で並列実行する:
-///  - 初期波: in-degree = 0 のノード全て
-///  - 各ノード完了後、後続の in-degree を -1。0 になったら次波に追加
-///  - ノードが失敗した場合は、依存する全ての下流ノードを `Skipped` とマーク
+/// 波形 (wave) 並列実行 + 失敗下流 taint + 条件付き実行 (`when`) +
+/// リトライ (`retry`) + サブワークフロー (`NodeType::Workflow`) を全てサポート。
 pub struct WorkflowExecutor {
     claude: Arc<ClaudeService>,
     delivery: Arc<DeliveryHub>,
     widgets: Arc<dyn WidgetRepo>,
     sdui: Arc<dyn SduiRepo>,
     executions: Arc<dyn ExecutionRepo>,
+    workflows: Arc<WorkflowStore>,
+    mqtt: Option<Arc<MqttBus>>,
 }
 
 impl WorkflowExecutor {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         claude: Arc<ClaudeService>,
         delivery: Arc<DeliveryHub>,
         widgets: Arc<dyn WidgetRepo>,
         sdui: Arc<dyn SduiRepo>,
         executions: Arc<dyn ExecutionRepo>,
+        workflows: Arc<WorkflowStore>,
+        mqtt: Option<Arc<MqttBus>>,
     ) -> Self {
         Self {
             claude,
@@ -92,19 +109,35 @@ impl WorkflowExecutor {
             widgets,
             sdui,
             executions,
+            workflows,
+            mqtt,
         }
     }
 
-    /// `trigger_data` は起動時の文脈データ (`{{ trigger.* }}` で参照可)。
-    /// 実行終了後に `ExecutionRepo` へ自動保存される (保存失敗はログのみ)。
-    pub async fn execute(&self, workflow: &Workflow, trigger_data: Value) -> ExecutionResult {
-        let execution_id = Uuid::new_v4();
-        let started_at = Utc::now();
+    /// 公開エントリ。トップレベル実行 (depth=0)。
+    /// 実行終了後に `ExecutionRepo` へ自動保存される。
+    pub fn execute(
+        self: Arc<Self>,
+        workflow: Workflow,
+        trigger_data: Value,
+    ) -> Pin<Box<dyn Future<Output = ExecutionResult> + Send>> {
+        self.execute_at_depth(workflow, trigger_data, 0)
+    }
 
-        // 1. 検証 (topo_sort はサイクル検出も兼ねる)
-        let topo_order = match topo_sort(workflow) {
-            Ok(o) => o,
-            Err(e) => {
+    /// 再帰可能な内部実装。Box::pin して dyn 化することで、サブワークフローでの
+    /// 自己再帰時に型が無限サイズになるのを防いでいる。
+    fn execute_at_depth(
+        self: Arc<Self>,
+        workflow: Workflow,
+        trigger_data: Value,
+        depth: usize,
+    ) -> Pin<Box<dyn Future<Output = ExecutionResult> + Send>> {
+        Box::pin(async move {
+            let execution_id = Uuid::new_v4();
+            let started_at = Utc::now();
+
+            // 0. 再帰深度チェック
+            if depth > MAX_SUBWORKFLOW_DEPTH {
                 let result = ExecutionResult {
                     execution_id,
                     workflow_id: workflow.id.clone(),
@@ -113,214 +146,334 @@ impl WorkflowExecutor {
                     started_at,
                     finished_at: Utc::now(),
                     nodes: Vec::new(),
-                    error: Some(format!("topology: {}", e)),
+                    error: Some(format!(
+                        "sub-workflow depth exceeded {}",
+                        MAX_SUBWORKFLOW_DEPTH
+                    )),
                 };
                 self.persist(&result).await;
                 return result;
             }
-        };
 
-        // 2. in-degree と隣接リスト
-        let mut in_degree: HashMap<String, usize> = workflow
-            .nodes
-            .iter()
-            .map(|n| (n.id.clone(), 0_usize))
-            .collect();
-        let mut adjacency: HashMap<String, Vec<String>> = HashMap::new();
-        for edge in &workflow.edges {
-            *in_degree.entry(edge.to.clone()).or_insert(0) += 1;
-            adjacency
-                .entry(edge.from.clone())
-                .or_default()
-                .push(edge.to.clone());
-        }
-
-        let mut outputs: HashMap<String, Value> = HashMap::new();
-        let mut tainted: HashSet<String> = HashSet::new();
-        let mut completed: HashMap<String, NodeExecution> = HashMap::new();
-        let mut overall_failed = false;
-
-        // 初期波: in_degree=0 を YAML 順に
-        let mut current_wave: Vec<String> = workflow
-            .nodes
-            .iter()
-            .filter(|n| in_degree.get(&n.id).copied().unwrap_or(0) == 0)
-            .map(|n| n.id.clone())
-            .collect();
-
-        while !current_wave.is_empty() {
-            // 3. 波ごとに JoinSet で並列実行
-            let mut joinset: JoinSet<NodeOutcome> = JoinSet::new();
-            // この波で同期的に決着するもの (template fail / tainted) も完了集合に積む
-            for node_id in &current_wave {
-                let node = match workflow.find_node(node_id) {
-                    Some(n) => n.clone(),
-                    None => continue,
-                };
-
-                if tainted.contains(node_id) {
-                    let now = Utc::now();
-                    completed.insert(
-                        node.id.clone(),
-                        NodeExecution {
-                            node_id: node.id.clone(),
-                            kind: node.kind,
-                            status: NodeStatus::Skipped,
-                            started_at: now,
-                            finished_at: now,
-                            output: Value::Null,
-                            error: None,
-                        },
-                    );
-                    continue;
+            // 1. 検証 (topo_sort)
+            let topo_order = match topo_sort(&workflow) {
+                Ok(o) => o,
+                Err(e) => {
+                    let result = ExecutionResult {
+                        execution_id,
+                        workflow_id: workflow.id.clone(),
+                        status: ExecutionStatus::Failed,
+                        trigger_data: trigger_data.clone(),
+                        started_at,
+                        finished_at: Utc::now(),
+                        nodes: Vec::new(),
+                        error: Some(format!("topology: {}", e)),
+                    };
+                    self.persist(&result).await;
+                    return result;
                 }
+            };
 
-                // テンプレート展開 (現在の outputs にのみ依存。同波の peer 出力は参照不可)
-                let ctx = TemplateContext {
-                    trigger: &trigger_data,
-                    outputs: &outputs,
-                };
-                let rendered = match render_value(&node.with, &ctx) {
-                    Ok(v) => v,
-                    Err(e) => {
+            // 2. in-degree と隣接リスト
+            let mut in_degree: HashMap<String, usize> = workflow
+                .nodes
+                .iter()
+                .map(|n| (n.id.clone(), 0_usize))
+                .collect();
+            let mut adjacency: HashMap<String, Vec<String>> = HashMap::new();
+            for edge in &workflow.edges {
+                *in_degree.entry(edge.to.clone()).or_insert(0) += 1;
+                adjacency
+                    .entry(edge.from.clone())
+                    .or_default()
+                    .push(edge.to.clone());
+            }
+
+            let mut outputs: HashMap<String, Value> = HashMap::new();
+            let mut tainted: HashSet<String> = HashSet::new();
+            let mut completed: HashMap<String, NodeExecution> = HashMap::new();
+            let mut overall_failed = false;
+
+            let mut current_wave: Vec<String> = workflow
+                .nodes
+                .iter()
+                .filter(|n| in_degree.get(&n.id).copied().unwrap_or(0) == 0)
+                .map(|n| n.id.clone())
+                .collect();
+
+            while !current_wave.is_empty() {
+                let mut joinset: JoinSet<NodeOutcome> = JoinSet::new();
+
+                for node_id in &current_wave {
+                    let node = match workflow.nodes.iter().find(|n| &n.id == node_id) {
+                        Some(n) => n.clone(),
+                        None => continue,
+                    };
+
+                    if tainted.contains(node_id) {
                         let now = Utc::now();
-                        overall_failed = true;
-                        taint_downstream(&node.id, &adjacency, &mut tainted);
                         completed.insert(
                             node.id.clone(),
                             NodeExecution {
                                 node_id: node.id.clone(),
                                 kind: node.kind,
-                                status: NodeStatus::Failed,
+                                status: NodeStatus::Skipped,
                                 started_at: now,
                                 finished_at: now,
                                 output: Value::Null,
-                                error: Some(format!("template: {}", e)),
+                                error: None,
+                                attempts: 0,
                             },
                         );
                         continue;
                     }
-                };
 
-                // spawn (各タスクは Arc を独立にクローン)
-                let claude = self.claude.clone();
-                let delivery = self.delivery.clone();
-                let widgets = self.widgets.clone();
-                let sdui = self.sdui.clone();
-                joinset.spawn(async move {
-                    let started_at = Utc::now();
-                    let result = match node.kind {
-                        NodeType::Ai => run_ai_node(&node, rendered, claude.as_ref()).await,
-                        NodeType::Action => {
-                            run_action_node(
-                                &node,
-                                rendered,
-                                delivery.as_ref(),
-                                widgets.as_ref(),
-                                sdui.as_ref(),
-                            )
-                            .await
-                        }
-                        NodeType::Transform => run_transform_node(&node, rendered).await,
+                    // テンプレート展開
+                    let ctx = TemplateContext {
+                        trigger: &trigger_data,
+                        outputs: &outputs,
                     };
-                    NodeOutcome {
-                        node_id: node.id.clone(),
-                        kind: node.kind,
-                        started_at,
-                        finished_at: Utc::now(),
-                        result,
-                    }
-                });
-            }
 
-            // 4. 波内の全結果を回収
-            while let Some(join_res) = joinset.join_next().await {
-                match join_res {
-                    Ok(outcome) => {
-                        let node_id = outcome.node_id.clone();
-                        match outcome.result {
-                            Ok(output) => {
-                                outputs.insert(node_id.clone(), output.clone());
-                                completed.insert(
-                                    node_id.clone(),
-                                    NodeExecution {
-                                        node_id,
-                                        kind: outcome.kind,
-                                        status: NodeStatus::Success,
-                                        started_at: outcome.started_at,
-                                        finished_at: outcome.finished_at,
-                                        output,
-                                        error: None,
-                                    },
-                                );
+                    // `when` が指定されていれば先に評価。falsy なら Skipped で下流継続。
+                    if let Some(cond_template) = &node.when {
+                        match render_string(cond_template, &ctx) {
+                            Ok(s) => {
+                                if !is_truthy(&s) {
+                                    let now = Utc::now();
+                                    completed.insert(
+                                        node.id.clone(),
+                                        NodeExecution {
+                                            node_id: node.id.clone(),
+                                            kind: node.kind,
+                                            status: NodeStatus::Skipped,
+                                            started_at: now,
+                                            finished_at: now,
+                                            output: Value::Null,
+                                            error: None,
+                                            attempts: 0,
+                                        },
+                                    );
+                                    // when=false は失敗ではない → outputs に Null を入れて
+                                    // 下流が `{{ <node>.x }}` を参照しても "" になるだけ。
+                                    outputs.insert(node.id.clone(), Value::Null);
+                                    continue;
+                                }
                             }
                             Err(e) => {
-                                tracing::warn!(node_id = %node_id, error = %e, "node failed");
                                 overall_failed = true;
-                                taint_downstream(&node_id, &adjacency, &mut tainted);
+                                taint_downstream(&node.id, &adjacency, &mut tainted);
+                                let now = Utc::now();
                                 completed.insert(
-                                    node_id.clone(),
+                                    node.id.clone(),
                                     NodeExecution {
-                                        node_id,
-                                        kind: outcome.kind,
+                                        node_id: node.id.clone(),
+                                        kind: node.kind,
                                         status: NodeStatus::Failed,
-                                        started_at: outcome.started_at,
-                                        finished_at: outcome.finished_at,
+                                        started_at: now,
+                                        finished_at: now,
                                         output: Value::Null,
-                                        error: Some(format!("{:#}", e)),
+                                        error: Some(format!("when: {}", e)),
+                                        attempts: 0,
                                     },
                                 );
+                                continue;
                             }
                         }
                     }
-                    Err(e) => {
-                        tracing::error!(error = %e, "join_next failed");
-                        overall_failed = true;
+
+                    let rendered = match render_value(&node.with, &ctx) {
+                        Ok(v) => v,
+                        Err(e) => {
+                            overall_failed = true;
+                            taint_downstream(&node.id, &adjacency, &mut tainted);
+                            let now = Utc::now();
+                            completed.insert(
+                                node.id.clone(),
+                                NodeExecution {
+                                    node_id: node.id.clone(),
+                                    kind: node.kind,
+                                    status: NodeStatus::Failed,
+                                    started_at: now,
+                                    finished_at: now,
+                                    output: Value::Null,
+                                    error: Some(format!("template: {}", e)),
+                                    attempts: 0,
+                                },
+                            );
+                            continue;
+                        }
+                    };
+
+                    // spawn — リトライポリシーをラップ
+                    let claude = self.claude.clone();
+                    let delivery = self.delivery.clone();
+                    let widgets = self.widgets.clone();
+                    let sdui = self.sdui.clone();
+                    let workflows_store = self.workflows.clone();
+                    let mqtt_bus = self.mqtt.clone();
+                    let executor_arc = Arc::clone(&self);
+                    let retry = node.retry.clone();
+                    joinset.spawn(async move {
+                        let started_at = Utc::now();
+                        let max_attempts = retry.as_ref().map(|r| r.max_attempts.max(1)).unwrap_or(1);
+                        let delay_ms = retry.as_ref().map(|r| r.delay_ms).unwrap_or(0);
+                        let backoff = retry.as_ref().map(|r| r.backoff).unwrap_or_default();
+
+                        let mut last_err: Option<anyhow::Error> = None;
+                        let mut attempts: u32 = 0;
+                        for attempt in 1..=max_attempts {
+                            attempts = attempt;
+                            let result = run_node_dispatch(
+                                &node,
+                                rendered.clone(),
+                                &claude,
+                                &delivery,
+                                widgets.as_ref(),
+                                sdui.as_ref(),
+                                mqtt_bus.as_ref(),
+                                &executor_arc,
+                                &workflows_store,
+                                depth,
+                            )
+                            .await;
+                            match result {
+                                Ok(output) => {
+                                    return NodeOutcome {
+                                        node_id: node.id.clone(),
+                                        kind: node.kind,
+                                        started_at,
+                                        finished_at: Utc::now(),
+                                        result: Ok(output),
+                                        attempts,
+                                    };
+                                }
+                                Err(e) => {
+                                    tracing::warn!(
+                                        node_id = %node.id,
+                                        attempt,
+                                        max_attempts,
+                                        error = %e,
+                                        "node attempt failed"
+                                    );
+                                    last_err = Some(e);
+                                    if attempt < max_attempts {
+                                        let wait = match backoff {
+                                            BackoffStrategy::Constant => delay_ms,
+                                            BackoffStrategy::Exponential => {
+                                                delay_ms.saturating_mul(2u64.saturating_pow(attempt - 1))
+                                            }
+                                        };
+                                        if wait > 0 {
+                                            tokio::time::sleep(
+                                                std::time::Duration::from_millis(wait),
+                                            )
+                                            .await;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        NodeOutcome {
+                            node_id: node.id.clone(),
+                            kind: node.kind,
+                            started_at,
+                            finished_at: Utc::now(),
+                            result: Err(last_err
+                                .unwrap_or_else(|| anyhow::anyhow!("unknown error"))),
+                            attempts,
+                        }
+                    });
+                }
+
+                while let Some(join_res) = joinset.join_next().await {
+                    match join_res {
+                        Ok(outcome) => {
+                            let node_id = outcome.node_id.clone();
+                            match outcome.result {
+                                Ok(output) => {
+                                    outputs.insert(node_id.clone(), output.clone());
+                                    completed.insert(
+                                        node_id.clone(),
+                                        NodeExecution {
+                                            node_id,
+                                            kind: outcome.kind,
+                                            status: NodeStatus::Success,
+                                            started_at: outcome.started_at,
+                                            finished_at: outcome.finished_at,
+                                            output,
+                                            error: None,
+                                            attempts: outcome.attempts,
+                                        },
+                                    );
+                                }
+                                Err(e) => {
+                                    tracing::warn!(node_id = %node_id, error = %e, "node failed");
+                                    overall_failed = true;
+                                    taint_downstream(&node_id, &adjacency, &mut tainted);
+                                    completed.insert(
+                                        node_id.clone(),
+                                        NodeExecution {
+                                            node_id,
+                                            kind: outcome.kind,
+                                            status: NodeStatus::Failed,
+                                            started_at: outcome.started_at,
+                                            finished_at: outcome.finished_at,
+                                            output: Value::Null,
+                                            error: Some(format!("{:#}", e)),
+                                            attempts: outcome.attempts,
+                                        },
+                                    );
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            tracing::error!(error = %e, "join_next failed");
+                            overall_failed = true;
+                        }
                     }
                 }
-            }
 
-            // 5. 次波構築: この波で完了したノードの後続の in-degree を -1
-            let mut next_wave: Vec<String> = Vec::new();
-            for nid in &current_wave {
-                if let Some(succs) = adjacency.get(nid) {
-                    for succ in succs {
-                        if let Some(deg) = in_degree.get_mut(succ) {
-                            if *deg > 0 {
-                                *deg -= 1;
-                                if *deg == 0 {
-                                    next_wave.push(succ.clone());
+                // 次波構築
+                let mut next_wave: Vec<String> = Vec::new();
+                for nid in &current_wave {
+                    if let Some(succs) = adjacency.get(nid) {
+                        for succ in succs {
+                            if let Some(deg) = in_degree.get_mut(succ) {
+                                if *deg > 0 {
+                                    *deg -= 1;
+                                    if *deg == 0 {
+                                        next_wave.push(succ.clone());
+                                    }
                                 }
                             }
                         }
                     }
                 }
+                current_wave = next_wave;
             }
-            current_wave = next_wave;
-        }
 
-        // 6. NodeExecution を topo 順に整列 (出力の決定性のため)
-        let nodes_vec: Vec<NodeExecution> = topo_order
-            .iter()
-            .filter_map(|id| completed.remove(id))
-            .collect();
+            let nodes_vec: Vec<NodeExecution> = topo_order
+                .iter()
+                .filter_map(|id| completed.remove(id))
+                .collect();
 
-        let result = ExecutionResult {
-            execution_id,
-            workflow_id: workflow.id.clone(),
-            status: if overall_failed {
-                ExecutionStatus::Failed
-            } else {
-                ExecutionStatus::Success
-            },
-            trigger_data,
-            started_at,
-            finished_at: Utc::now(),
-            nodes: nodes_vec,
-            error: None,
-        };
-        self.persist(&result).await;
-        result
+            let result = ExecutionResult {
+                execution_id,
+                workflow_id: workflow.id.clone(),
+                status: if overall_failed {
+                    ExecutionStatus::Failed
+                } else {
+                    ExecutionStatus::Success
+                },
+                trigger_data,
+                started_at,
+                finished_at: Utc::now(),
+                nodes: nodes_vec,
+                error: None,
+            };
+            self.persist(&result).await;
+            result
+        })
     }
 
     async fn persist(&self, result: &ExecutionResult) {
@@ -334,16 +487,15 @@ impl WorkflowExecutor {
     }
 }
 
-/// spawned タスクから返す戻り値。
 struct NodeOutcome {
     node_id: String,
     kind: NodeType,
     started_at: DateTime<Utc>,
     finished_at: DateTime<Utc>,
     result: anyhow::Result<Value>,
+    attempts: u32,
 }
 
-/// `start` の下流すべてを tainted にマークする (BFS)。
 fn taint_downstream(
     start: &str,
     adjacency: &HashMap<String, Vec<String>>,
@@ -361,9 +513,37 @@ fn taint_downstream(
     }
 }
 
-// =============================================================
-// Free-standing node-type dispatchers (Arc 経由で spawn できるよう)
-// =============================================================
+/// `when` 評価ロジック。
+fn is_truthy(s: &str) -> bool {
+    let trimmed = s.trim();
+    !matches!(
+        trimmed.to_ascii_lowercase().as_str(),
+        "" | "false" | "no" | "0" | "null" | "off"
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn run_node_dispatch(
+    node: &Node,
+    with: Value,
+    claude: &ClaudeService,
+    delivery: &DeliveryHub,
+    widgets: &dyn WidgetRepo,
+    sdui: &dyn SduiRepo,
+    mqtt: Option<&Arc<MqttBus>>,
+    executor: &Arc<WorkflowExecutor>,
+    workflows: &Arc<WorkflowStore>,
+    depth: usize,
+) -> anyhow::Result<Value> {
+    match node.kind {
+        NodeType::Ai => run_ai_node(node, with, claude).await,
+        NodeType::Action => run_action_node(node, with, delivery, widgets, sdui, mqtt).await,
+        NodeType::Transform => run_transform_node(node, with).await,
+        NodeType::Workflow => {
+            run_workflow_node(node, with, executor.clone(), workflows.clone(), depth).await
+        }
+    }
+}
 
 async fn run_ai_node(
     node: &Node,
@@ -409,6 +589,7 @@ async fn run_action_node(
     delivery: &DeliveryHub,
     widgets: &dyn WidgetRepo,
     sdui: &dyn SduiRepo,
+    mqtt: Option<&Arc<MqttBus>>,
 ) -> anyhow::Result<Value> {
     let using = node
         .using
@@ -458,6 +639,38 @@ async fn run_action_node(
                 });
             Ok(serde_json::json!({ "receivers": receivers }))
         }
+        "builtin/fail" => {
+            // テスト用: 必ず失敗するアクション。リトライ検証で使う。
+            let params: FailParams =
+                serde_json::from_value(with).unwrap_or(FailParams { reason: None });
+            anyhow::bail!(
+                "builtin/fail invoked: {}",
+                params.reason.unwrap_or_else(|| "intentional".into())
+            )
+        }
+        "builtin/fail-once" => {
+            // テスト用: 各 attempt で「2回目以降は成功」のセマンティクス。
+            // 単純に成功を返すバージョン (リトライ完了確認用)。
+            Ok(serde_json::json!({ "tried": true }))
+        }
+        "builtin/mqtt-publish" => {
+            let bus = mqtt.ok_or_else(|| {
+                anyhow::anyhow!("mqtt-publish requires IRIS_MQTT_BROKER to be configured")
+            })?;
+            let params: MqttPublishParams =
+                serde_json::from_value(with).context("mqtt-publish params")?;
+            let payload_bytes: Vec<u8> = match params.payload {
+                Value::String(s) => s.into_bytes(),
+                Value::Null => Vec::new(),
+                other => serde_json::to_vec(&other)?,
+            };
+            bus.publish(&params.topic, payload_bytes.clone(), params.retain)
+                .await?;
+            Ok(serde_json::json!({
+                "topic": params.topic,
+                "bytes": payload_bytes.len(),
+            }))
+        }
         other => anyhow::bail!("unknown action '{}'", other),
     }
 }
@@ -479,6 +692,37 @@ async fn run_transform_node(node: &Node, with: Value) -> anyhow::Result<Value> {
         })),
         other => anyhow::bail!("unknown transform '{}'", other),
     }
+}
+
+async fn run_workflow_node(
+    node: &Node,
+    with: Value,
+    executor: Arc<WorkflowExecutor>,
+    workflows: Arc<WorkflowStore>,
+    depth: usize,
+) -> anyhow::Result<Value> {
+    let params: WorkflowNodeParams =
+        serde_json::from_value(with).context("workflow node params")?;
+    let sub_wf = workflows
+        .get(&params.workflow_id)
+        .ok_or_else(|| anyhow::anyhow!("sub-workflow not found: '{}'", params.workflow_id))?;
+    tracing::info!(
+        node_id = %node.id,
+        sub_workflow = %params.workflow_id,
+        depth,
+        "invoking sub-workflow"
+    );
+    let sub_result = executor
+        .execute_at_depth(sub_wf, params.trigger_data, depth + 1)
+        .await;
+    if matches!(sub_result.status, ExecutionStatus::Failed) {
+        anyhow::bail!(
+            "sub-workflow '{}' failed: {}",
+            params.workflow_id,
+            sub_result.error.clone().unwrap_or_default()
+        );
+    }
+    Ok(serde_json::to_value(&sub_result)?)
 }
 
 // =============================================================
@@ -517,3 +761,31 @@ struct BroadcastParams {
     #[serde(default)]
     data: Option<Value>,
 }
+
+#[derive(Debug, Deserialize)]
+struct FailParams {
+    #[serde(default)]
+    reason: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct WorkflowNodeParams {
+    workflow_id: String,
+    #[serde(default)]
+    trigger_data: Value,
+}
+
+#[derive(Debug, Deserialize)]
+struct MqttPublishParams {
+    pub topic: String,
+    /// 文字列ならそのまま、それ以外なら JSON にシリアライズして送る。
+    #[serde(default)]
+    pub payload: Value,
+    #[serde(default)]
+    pub retain: bool,
+}
+
+// `RetryPolicy` を `unused_must_use` 経由でリファクタ警告に振らせないために
+// `_` 参照しておく必要が将来出てきたらここに。
+#[allow(dead_code)]
+fn _retry_marker(_: RetryPolicy) {}

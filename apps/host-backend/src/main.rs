@@ -1,6 +1,7 @@
 use anyhow::Context as _;
-use host_backend::{build_app, telemetry, AppState, Config};
+use host_backend::{build_app, mqtt::MqttBus, telemetry, AppState, Config};
 use sqlx::postgres::PgPoolOptions;
+use std::sync::Arc;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -8,6 +9,20 @@ async fn main() -> anyhow::Result<()> {
 
     let config = Config::from_env();
     let bind = config.bind;
+
+    // MQTT 接続 (任意)。state 構築前に確立する。
+    let mqtt: Option<Arc<MqttBus>> = if let Some(url) = &config.mqtt_broker {
+        tracing::info!(broker = %url, "connecting to MQTT broker");
+        match MqttBus::connect(url, &config.mqtt_client_id).await {
+            Ok(bus) => Some(bus),
+            Err(e) => {
+                tracing::error!(error = %e, "mqtt connection failed; continuing without MQTT");
+                None
+            }
+        }
+    } else {
+        None
+    };
 
     let state = match &config.database_url {
         Some(url) => {
@@ -19,18 +34,17 @@ async fn main() -> anyhow::Result<()> {
                 .await
                 .context("connect to PostgreSQL")?;
 
-            // 起動時に migrations を自動適用 (dev/host 想定)
             sqlx::migrate!("./migrations")
                 .run(&pool)
                 .await
                 .context("apply migrations")?;
             tracing::info!("migrations applied");
 
-            AppState::new_with_pool(config.clone(), pool)
+            AppState::new_with_pool(config.clone(), pool, mqtt.clone())
         }
         None => {
             tracing::warn!("DATABASE_URL not set, using in-memory storage (data lost on restart)");
-            AppState::new_in_memory(config.clone())
+            AppState::new_in_memory(config.clone(), mqtt.clone())
         }
     };
 

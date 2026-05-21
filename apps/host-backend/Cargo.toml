@@ -15,6 +15,7 @@ async-trait = { workspace = true }
 dashmap = { workspace = true }
 cron = { workspace = true }
 notify = { workspace = true }
+rumqttc = { workspace = true }
 axum = { workspace = true }
 tower = { workspace = true }
 tower-http = { workspace = true }

@@ -9,6 +9,7 @@ pub mod config;
 pub mod delivery;
 pub mod domain;
 pub mod error;
+pub mod mqtt;
 pub mod state;
 pub mod storage;
 pub mod telemetry;

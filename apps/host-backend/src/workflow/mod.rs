@@ -19,7 +19,7 @@ pub mod loader;
 pub mod store;
 pub mod template;
 
-pub use dsl::{Edge, Node, NodeType, Trigger, Workflow};
+pub use dsl::{BackoffStrategy, Edge, Node, NodeType, RetryPolicy, Trigger, Workflow};
 pub use executor::{
     ExecutionResult, ExecutionStatus, NodeExecution, NodeStatus, WorkflowExecutor,
 };

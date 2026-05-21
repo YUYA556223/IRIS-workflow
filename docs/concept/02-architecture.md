@@ -37,9 +37,11 @@ Rust + Axum で書かれた **ローカルデーモン**。すべての中核ロ
 | `ai/` | P2 ✅ | Claude Code subprocess を管理 (stream-json NDJSON)。`ClaudeService` が Semaphore + timeout でラップ |
 | `workflow/` | P3 ✅ + P3.3 ✅ | DAG エンジン。YAML ロード + ai/action/transform ノード実行 + テンプレート展開 + `JoinSet` 並列実行 + 失敗下流伝播 |
 | 実行履歴 | P3.2 ✅ | `workflow_executions` (Postgres + メモリ)、`/executions` API |
-| `triggers/` | P3.1 ✅ | cron / webhook (`POST /hooks/*path`) / fs-watch (notify) — `TriggerHub.sync()` で再構築 |
-| MCP permission | P2.1 | `rmcp` で permission-prompt-tool 受け、デバイスへ承認 push |
-| `devices/` (MQTT) | P8 | IoT 接続用 MQTT クライアント (rumqttd 統合) |
+| `triggers/` | P3.1 ✅ + P8 ✅ | cron / webhook / fs-watch / **mqtt** — `TriggerHub.sync()` で再構築 |
+| MCP permission | P2.1 ✅ | `iris-mcp-permission` (stdio JSON-RPC) + `/permission/{request,respond}` |
+| `mqtt/` | P8 ✅ | `rumqttc` クライアントと broadcast バス。`builtin/mqtt-publish` 連携 |
+| iOS WidgetKit | P5.1 ✅ scaffold | Swift Widget extension + App Group + APNs token bridge (Xcode 実機ビルド要) |
+| Windows MSIX | P9 ✅ config | `msix` Flutter プラグインで `apps/desktop` をパッケージ |
 
 なお Server-driven UI は専用モジュールを切らず、`domain::sdui` (型) + `delivery` (配信) + `api::sdui` (REST) の3点に分散させている (P7 で必要があれば `sdui/` モジュールを切る)。
 

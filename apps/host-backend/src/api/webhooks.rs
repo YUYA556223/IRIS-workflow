@@ -31,6 +31,6 @@ async fn handler(
     let workflow = s.workflows.get(&workflow_id).ok_or(AppError::NotFound)?;
     let trigger_data = body.map(|Json(v)| v).unwrap_or(Value::Null);
     tracing::info!(path = %path, workflow_id = %workflow_id, "webhook hit");
-    let result = s.executor.execute(&workflow, trigger_data).await;
+    let result = s.executor.clone().execute(workflow, trigger_data).await;
     Ok(Json(result))
 }

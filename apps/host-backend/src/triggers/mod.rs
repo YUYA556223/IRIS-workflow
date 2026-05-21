@@ -22,6 +22,7 @@ use notify::Watcher;
 use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
 
+use crate::mqtt::{topic_matches, MqttBus};
 use crate::workflow::{Trigger, Workflow, WorkflowExecutor, WorkflowStore};
 
 /// 内部状態。`sync()` で全置換する。
@@ -29,6 +30,8 @@ struct State {
     cron: HashMap<String, JoinHandle<()>>,
     /// FS タスクは watcher を tuple で同梱保持し、ハブを drop すると停止する。
     fs: HashMap<String, FsTask>,
+    /// MQTT タスク (subscriber + handler)
+    mqtt: HashMap<String, JoinHandle<()>>,
     /// webhook path -> workflow id
     webhook: HashMap<String, String>,
 }
@@ -48,17 +51,24 @@ impl Drop for FsTask {
 pub struct TriggerHub {
     workflows: Arc<WorkflowStore>,
     executor: Arc<WorkflowExecutor>,
+    mqtt: Option<Arc<MqttBus>>,
     state: Mutex<State>,
 }
 
 impl TriggerHub {
-    pub fn new(workflows: Arc<WorkflowStore>, executor: Arc<WorkflowExecutor>) -> Self {
+    pub fn new(
+        workflows: Arc<WorkflowStore>,
+        executor: Arc<WorkflowExecutor>,
+        mqtt: Option<Arc<MqttBus>>,
+    ) -> Self {
         Self {
             workflows,
             executor,
+            mqtt,
             state: Mutex::new(State {
                 cron: HashMap::new(),
                 fs: HashMap::new(),
+                mqtt: HashMap::new(),
                 webhook: HashMap::new(),
             }),
         }
@@ -73,6 +83,9 @@ impl TriggerHub {
         for (_, h) in state.cron.drain() {
             h.abort();
         }
+        for (_, h) in state.mqtt.drain() {
+            h.abort();
+        }
         state.fs.clear(); // Drop で watcher 停止 + task abort
         state.webhook.clear();
 
@@ -80,6 +93,7 @@ impl TriggerHub {
         let mut cron_count = 0;
         let mut fs_count = 0;
         let mut webhook_count = 0;
+        let mut mqtt_count = 0;
 
         for wf in workflows {
             match &wf.trigger {
@@ -105,8 +119,33 @@ impl TriggerHub {
                         Err(e) => tracing::error!(workflow_id = %wf.id, error = %e, "fs-watch failed"),
                     }
                 }
-                Trigger::Mqtt { .. } => {
-                    tracing::debug!(workflow_id = %wf.id, "mqtt trigger registered (P8 todo)");
+                Trigger::Mqtt { topic } => {
+                    if let Some(bus) = self.mqtt.as_ref() {
+                        match spawn_mqtt(
+                            self.executor.clone(),
+                            wf.clone(),
+                            bus.clone(),
+                            topic.clone(),
+                        )
+                        .await
+                        {
+                            Ok(h) => {
+                                state.mqtt.insert(wf.id.clone(), h);
+                                mqtt_count += 1;
+                            }
+                            Err(e) => tracing::error!(
+                                workflow_id = %wf.id,
+                                topic = %topic,
+                                error = %e,
+                                "mqtt subscribe failed"
+                            ),
+                        }
+                    } else {
+                        tracing::warn!(
+                            workflow_id = %wf.id,
+                            "mqtt trigger requires IRIS_MQTT_BROKER; skipping"
+                        );
+                    }
                 }
             }
         }
@@ -115,6 +154,7 @@ impl TriggerHub {
             cron = cron_count,
             fs = fs_count,
             webhook = webhook_count,
+            mqtt = mqtt_count,
             "triggers synced"
         );
     }
@@ -161,7 +201,10 @@ fn spawn_cron(
                 "schedule": schedule_label,
                 "fired_at": Utc::now().to_rfc3339(),
             });
-            let result = executor.execute(&workflow, trigger_data).await;
+            let result = executor
+                .clone()
+                .execute(workflow.clone(), trigger_data)
+                .await;
             tracing::info!(
                 workflow_id = %workflow.id,
                 execution_id = %result.execution_id,
@@ -204,7 +247,10 @@ fn spawn_fs_watch(
                 "paths": ev.paths.iter().map(|p| p.display().to_string()).collect::<Vec<_>>(),
                 "fired_at": Utc::now().to_rfc3339(),
             });
-            let result = executor.execute(&workflow, trigger_data).await;
+            let result = executor
+                .clone()
+                .execute(workflow.clone(), trigger_data)
+                .await;
             tracing::info!(
                 workflow_id = %workflow.id,
                 execution_id = %result.execution_id,
@@ -219,4 +265,52 @@ fn spawn_fs_watch(
         _watcher: watcher,
         handle,
     })
+}
+
+async fn spawn_mqtt(
+    executor: Arc<WorkflowExecutor>,
+    workflow: Workflow,
+    bus: Arc<MqttBus>,
+    topic_filter: String,
+) -> anyhow::Result<JoinHandle<()>> {
+    let mut rx = bus.subscribe(&topic_filter).await?;
+    let workflow_id = workflow.id.clone();
+    let filter_for_log = topic_filter.clone();
+    let handle = tokio::spawn(async move {
+        loop {
+            match rx.recv().await {
+                Ok(msg) => {
+                    if !topic_matches(&topic_filter, &msg.topic) {
+                        continue;
+                    }
+                    let trigger_data = serde_json::json!({
+                        "trigger": "mqtt",
+                        "topic": msg.topic,
+                        "payload": msg.payload_str.clone()
+                            .map(serde_json::Value::String)
+                            .unwrap_or(serde_json::Value::Null),
+                        "qos": msg.qos,
+                        "fired_at": Utc::now().to_rfc3339(),
+                    });
+                    let result = executor
+                        .clone()
+                        .execute(workflow.clone(), trigger_data)
+                        .await;
+                    tracing::info!(
+                        workflow_id = %workflow.id,
+                        topic = %msg.topic,
+                        execution_id = %result.execution_id,
+                        status = ?result.status,
+                        "mqtt-triggered execution finished"
+                    );
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                    tracing::warn!(lagged = n, "mqtt subscriber lagged");
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+            }
+        }
+    });
+    tracing::info!(%workflow_id, topic = %filter_for_log, "mqtt trigger registered");
+    Ok(handle)
 }

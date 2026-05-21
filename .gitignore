@@ -44,6 +44,9 @@ postgres-data/
 !.env.example
 *.pem
 *.key
+*.pfx
+*.p8
+*.p12
 
 # ----- Logs -----
 *.log

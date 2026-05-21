@@ -288,7 +288,7 @@ OK: workflow execution propagated to WS notification
 | `cron`    | `cron::Schedule` (6-7 フィールド: `sec min hr dom mon dow`) で次回時刻計算 → tokio task が sleep+execute |
 | `webhook` | path をマップに登録、`POST /hooks/<path>` でルックアップ |
 | `fs-watch` | `notify::recommended_watcher` + mpsc。任意のイベントで execute (`kind` / `paths` を trigger_data に詰める) |
-| `mqtt`    | P8 (未実装) |
+| `mqtt`    | `rumqttc` の AsyncClient + broadcast バス。topic フィルタ (`+` `#` 対応) で workflow 起動 |
 
 `sync()` はワークフロー upsert/delete のたびに自動呼び出し。既存タスクは abort し、watcher は drop で停止。
 
@@ -313,6 +313,18 @@ node scripts/test-p3-full.mjs    # webhook / 並列 / 履歴 / 失敗伝播 / cr
 4. 失敗伝播: 上流失敗時に依存ノードは `Skipped`、独立ノードは並列実行で生存
 5. `cron: "*/3 * * * * *"` 登録 → 6.5 秒で 2 回起動
 6. `fs-watch` 登録 → ファイル作成で起動 (`{{ trigger.kind }}` = `Modify(Any)`)
+
+`test-p3-4.mjs` (P3.4) と `test-p8.mjs` (P8) も追加。`when`/`retry`/`secrets`/
+`sub-workflow`/`mqtt trigger`/`mqtt-publish` の全観点を E2E でカバー済み:
+
+```powershell
+$env:IRIS_MQTT_BROKER = 'tcp://127.0.0.1:1883'
+$env:IRIS_SECRET_P3_4_DEMO = 'from-env'
+docker compose -f infra/docker/docker-compose.yml up -d
+# host-backend を起動した状態で:
+node scripts/test-p3-4.mjs
+node scripts/test-p8.mjs
+```
 
 ## Claude Code の Permission Prompt との繋ぎ込み
 
@@ -356,9 +368,11 @@ Claude Code 起動側のサンプル `mcp-config.json`:
 | P3.3 | 並列ノード実行 + 失敗伝播 | ✅ |
 | P4   | Next.js web-console (一覧 / 実行 / 履歴 / Live) | ✅ |
 | P5   | Flutter Mobile (Workflows / Executions / Live / Settings) | ✅ |
-| P3.4 | 分岐 / リトライ / Secret store / サブワークフロー | TODO |
-| P5.1 | iOS WidgetKit + APNs 統合 (実機配信) | TODO |
-| P8   | MQTT (rumqttd) 統合 → `trigger: mqtt` 解禁 | TODO |
+| P3.4 | 条件分岐 (`when`) / リトライ / Secrets / サブワークフロー | ✅ |
+| P5.1 | iOS WidgetKit + APNs (Swift + Flutter ブリッジ) | ✅ scaffold (Mac/Xcode 必須) |
+| P8   | MQTT (rumqttc) — `trigger: mqtt` + `builtin/mqtt-publish` | ✅ |
+| P9   | Windows MSIX (Flutter desktop) | ✅ config (証明書は別途) |
+| —    | host-backend 側 APNs HTTP/2 配信実装 / Store 提出 / Observability | TODO |
 
 ## テスト
 

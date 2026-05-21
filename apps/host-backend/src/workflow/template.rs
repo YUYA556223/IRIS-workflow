@@ -77,6 +77,22 @@ fn resolve_path(path: &str, ctx: &TemplateContext) -> anyhow::Result<Value> {
         anyhow::bail!("empty template path");
     }
     let first = parts[0];
+
+    // Secrets resolver (P3.4): `{{ secrets.NAME }}` を環境変数 `IRIS_SECRET_NAME`
+    // に解決する。秘密情報を YAML に書かずに済むようにするための仕組み。
+    if first == "secrets" {
+        if parts.len() != 2 {
+            anyhow::bail!("secrets path must be 'secrets.NAME', got '{}'", path);
+        }
+        let name = parts[1];
+        if name.is_empty() {
+            anyhow::bail!("secret name must not be empty");
+        }
+        let env_name = format!("IRIS_SECRET_{}", name);
+        let value = std::env::var(&env_name).unwrap_or_default();
+        return Ok(Value::String(value));
+    }
+
     let mut current: &Value = if first == "trigger" {
         ctx.trigger
     } else {
@@ -149,5 +165,21 @@ mod tests {
             render_string("hi {{ trigger.user }}", &ctx).unwrap(),
             "hi yuya"
         );
+    }
+
+    #[test]
+    fn renders_secret_from_env() {
+        // Set + unset must serialize in this test (otherwise other tests could
+        // see it). We use a unique env var name.
+        unsafe { std::env::set_var("IRIS_SECRET_TEST_TOKEN", "shhh") };
+        let outputs = HashMap::new();
+        let trigger = Value::Null;
+        let ctx = TemplateContext {
+            trigger: &trigger,
+            outputs: &outputs,
+        };
+        let out = render_string("token=[{{ secrets.TEST_TOKEN }}]", &ctx).unwrap();
+        assert_eq!(out, "token=[shhh]");
+        unsafe { std::env::remove_var("IRIS_SECRET_TEST_TOKEN") };
     }
 }
